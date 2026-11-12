@@ -1,5 +1,7 @@
 # d5data-crawler-test
 
+[![CI](https://github.com/wzjaiykz/d5data-crawler-test/actions/workflows/ci.yml/badge.svg)](https://github.com/wzjaiykz/d5data-crawler-test/actions/workflows/ci.yml)
+
 Crawl <https://mitadmissions.org/blogs/> with **both** Playwright and
 DrissionPage, and write the same CSV from each implementation:
 

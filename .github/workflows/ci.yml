@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Byte-compile every script
+        run: python -m compileall -q crawl_playwright.py crawl_drissionpage.py compare.py image_rules.py
+
+      - name: Unit-test the image grouping rules
+        run: python -m pytest tests -q
