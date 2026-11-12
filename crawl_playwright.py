@@ -12,8 +12,9 @@ Usage:
 """
 
 import argparse
-import concurrent.futures
+import base64
 import csv
+import html
 import pathlib
 import re
 import sys
@@ -234,13 +235,13 @@ def scrape_article(
     )
 
     author_raw = page.inner_text(".page-topper__title__name").strip()
-    author = re.sub(r"^by\s+", "", author_raw, flags=re.IGNORECASE)
+    author = html.unescape(re.sub(r"^by\s+", "", author_raw, flags=re.IGNORECASE))
 
     published = page.get_attribute("time.page-topper__date", "datetime") or ""
     if not published:
         published = page.inner_text("time.page-topper__date").strip()
 
-    content = WHITESPACE.sub(" ", page.inner_text(".article__body").strip())
+    content = WHITESPACE.sub(" ", html.unescape(page.inner_text(".article__body")).strip())
 
     # The DOM is the source of truth for *which* images belong to the article;
     # the network layer only supplies their bytes for the download step.
@@ -271,22 +272,42 @@ def scrape_article(
     )
 
 
-def save_images(collector: ImageCollector, urls: str, article_url: str, root: pathlib.Path) -> int:
-    """Write the image bytes captured while the page was loading."""
+FETCH_JS = """async (url) => {
+    const response = await fetch(url, { credentials: 'include' });
+    if (!response.ok) return null;
+    const buffer = new Uint8Array(await response.arrayBuffer());
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < buffer.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, buffer.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+}"""
+
+
+def save_images(page, urls: str, article_url: str, root: pathlib.Path) -> int:
+    """Fetch each image from inside the page so the request carries the browser session."""
     items = [u.strip() for u in urls.split(";") if u.strip()]
     if not items:
         return 0
     slug = article_url.rstrip("/").rsplit("/", 1)[-1] or "article"
     folder = root / slug
     folder.mkdir(parents=True, exist_ok=True)
+
     saved = 0
     for index, image_url in enumerate(items, 1):
-        body = collector.bodies.get(image_url)
-        if not body:
+        try:
+            encoded = page.evaluate(FETCH_JS, image_url)
+            if not encoded:
+                continue
+            body = base64.b64decode(encoded)
+            if not body:
+                continue
+            suffix = pathlib.Path(urllib.parse.urlparse(image_url).path).suffix or ".jpg"
+            (folder / f"{index:02d}{suffix}").write_bytes(body)
+            saved += 1
+        except Exception:  # noqa: BLE001 - a single broken image must not stop the run
             continue
-        suffix = pathlib.Path(urllib.parse.urlparse(image_url).path).suffix or ".jpg"
-        (folder / f"{index:02d}{suffix}").write_bytes(body)
-        saved += 1
     return saved
 
 
@@ -346,7 +367,7 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001 - one bad page must not stop the run
                 print(f"[{index}/{len(links)}] FAILED {url}: {exc}", file=sys.stderr)
                 continue
-            saved = save_images(collector, article.images, url, pathlib.Path(args.image_dir))
+            saved = save_images(page, article.images, url, pathlib.Path(args.image_dir))
             articles.append(article)
             print(
                 f"[{index}/{len(links)}] {article.title[:36]:36s} "

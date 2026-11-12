@@ -146,6 +146,36 @@ Measured on a real post: 58 URLs in, 58 out - that article references 58
 distinct uploads, so there was nothing to collapse. The helper still matters for
 posts that embed several sizes of the same picture.
 
+## Getting the image bytes past Cloudflare
+
+Plain HTTP clients (`requests`, `httpx`, even Playwright's own
+`context.request.get`) receive **403** from the site's Cloudflare rules, because
+those requests do not carry a browser session.
+
+Two browser-native routes are used instead:
+
+| Driver | How the bytes are fetched |
+|---|---|
+| Playwright | `page.evaluate()` runs `fetch(url, {credentials:'include'})` inside the article's origin, then the body comes back as base64 |
+| DrissionPage | `page.download(url, ...)` uses the browser's own download path |
+
+Result on a post with 58 images: **58 URLs, 58 files**. Before this change the
+crawler could only keep the images the browser happened to load (46 of 58).
+
+The lesson is not "bypass Cloudflare" but "use the session the browser already
+has" - the same session a human visitor uses.
+
+## Stress test scope
+
+The committed CSVs come from a multi-page run, not a single page:
+
+```bash
+python crawl_playwright.py --max-pages 3     # ~48 articles
+python crawl_drissionpage.py --max-pages 2   # ~32 articles
+```
+
+The single-page run that `--max-pages 1` produces is the quick smoke test.
+
 ## Cross-check results (16 posts on the listing page)
 
 ```

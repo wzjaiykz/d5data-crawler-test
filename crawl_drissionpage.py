@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import csv
+import html
 import pathlib
 from urllib.parse import urljoin
 import re
@@ -131,7 +132,7 @@ def scrape_article(page, url: str) -> dict[str, object]:
         published = date_element.attr("datetime") or date_element.text.strip()
 
     body_element = page.ele("css:.article__body", timeout=10)
-    content = body_element.text.strip() if body_element else ""
+    content = html.unescape(body_element.text.strip()) if body_element else ""
     content = WHITESPACE.sub(" ", content)  # one row per article
 
     image_sources = keep_largest(

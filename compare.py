@@ -11,6 +11,10 @@ import difflib
 import re
 import sys
 
+# Article titles contain emoji; a GBK console would crash while printing them.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 WHITESPACE = re.compile(r"\s+")
 FIELDS = ["Author", "Comment Count", "Time", "Article Content", "Images In Article"]
 
@@ -32,10 +36,20 @@ def normalise(value: str) -> str:
     return WHITESPACE.sub(" ", (value or "").translate(TRANSLATE).strip())
 
 
+def title_key(value: str) -> str:
+    """Join key: emoji are stripped because the two drivers disagree on them.
+
+    Playwright keeps the emoji from the DOM text, DrissionPage sometimes drops
+    them, so the same article would otherwise look like two different rows.
+    """
+    without_emoji = "".join(ch for ch in normalise(value) if ord(ch) < 0x2190)
+    return WHITESPACE.sub(" ", without_emoji).strip()
+
+
 def load(path: str) -> dict[str, dict[str, str]]:
     with open(path, encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
-    return {normalise(row["Title"]): row for row in rows}
+    return {title_key(row["Title"]): row for row in rows}
 
 
 def main() -> int:
