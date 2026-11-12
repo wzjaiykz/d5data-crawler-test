@@ -68,6 +68,30 @@ python crawl_playwright.py --comment-timeout 6000   # give up on Disqus sooner
 4. **Polite crawling.** 0.5 s between detail pages, one browser instance reused
    for the whole run.
 
+## Cross-check results (16 posts on the listing page)
+
+```
+python compare.py blogs_playwright.csv blogs_drissionpage.csv
+```
+
+| Field | Agreement |
+|---|---|
+| Title | 16/16 (used as the join key) |
+| Author | 16/16 (100%) |
+| Comment Count | 16/16 (100%) |
+| Time | 16/16 (100%) |
+| Images In Article | 16/16 (100%) |
+| Article Content | 13/16 at >= 0.95 similarity |
+
+The three content differences come from one concrete behaviour: **DrissionPage's
+`.text` includes image `alt` text** (for example "An arrow pointing right"),
+while Playwright's `inner_text()` does not. The same post therefore carries ~300
+extra characters under DrissionPage, while the extracted prose itself is
+identical.
+
+That is exactly what a second implementation is for: the data is the same, the
+text-extraction semantics are not.
+
 ## Output sample
 
 ```
