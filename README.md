@@ -178,26 +178,48 @@ python crawl_drissionpage.py --max-pages 2   # ~32 articles
 
 The single-page run that `--max-pages 1` produces is the quick smoke test.
 
-## Cross-check results (16 posts on the listing page)
+## What the CI runs (and what it deliberately does not)
+
+`.github/workflows/ci.yml` byte-compiles the four scripts and unit-tests the pure
+logic in `image_rules.py` (four tests covering size suffixes, original-versus-scaled
+ranking and distinct uploads).
+
+It does **not** crawl the live site. A CI job that depends on a third-party site is
+not a test of this code — it is a test of that site's uptime, network reachability
+and whatever Cloudflare decides to do that day. A red badge would then say nothing
+about whether the commit is good, which makes the badge worthless.
+
+The split is deliberate: external I/O is verified by running the crawler by hand
+(the stress run below), and the parts I actually control are verified on every push.
+
+## Cross-check results (multi-page run: 48 vs 32 articles)
 
 ```
 python compare.py blogs_playwright.csv blogs_drissionpage.csv
 ```
 
-| Field | Agreement |
-|---|---|
-| Title | 16/16 (used as the join key) |
-| Author | 16/16 (100%) |
-| Comment Count | 16/16 (100%) |
-| Time | 16/16 (100%) |
-| Images In Article | 16/16 (100%) |
-| Article Content | 13/16 at >= 0.95 similarity |
+The two runs cover different numbers of pages on purpose: Playwright collects three
+listing pages (48 articles), DrissionPage two (32), so 32 articles are common to both
+and 16 exist only in the Playwright file.
 
-The three content differences come from one concrete behaviour: **DrissionPage's
-`.text` includes image `alt` text** (for example "An arrow pointing right"),
-while Playwright's `inner_text()` does not. The same post therefore carries ~300
-extra characters under DrissionPage, while the extracted prose itself is
-identical.
+| Field | Agreement on the 32 common articles |
+|---|---|
+| Title | used as the join key, after emoji-insensitive normalisation |
+| Author | 32/32 (100%) |
+| Comment Count | 32/32 (100%) |
+| Time | 9/32 (28%) |
+| Images In Article | reported per row; the two sources differ by design |
+| Article Content | 25/32 at >= 0.95 similarity |
+
+Two differences are expected rather than defects:
+
+- **Time.** Playwright takes the ISO timestamp from the REST API; DrissionPage reads
+  the date printed on the page, which is midnight in the site's timezone. The same
+  day, different precision.
+- **Article Content.** DrissionPage's `.text` includes image `alt` text (for example
+  "An arrow pointing right") while Playwright's `inner_text()` does not, so the same
+  post carries ~300 extra characters under DrissionPage. The prose itself is
+  identical.
 
 That is exactly what a second implementation is for: the data is the same, the
 text-extraction semantics are not.
