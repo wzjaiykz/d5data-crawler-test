@@ -106,6 +106,34 @@ https://mitadmissions.org/wp-content/uploads/2026/11/image1-800x533.jpg; ...
   reuses the bytes the browser already downloaded because plain `requests` calls
   are blocked by Cloudflare; DrissionPage uses `page.download()`.
 
+## The shortcut: the site exposes a WordPress REST API
+
+Instead of guessing from the DOM, the crawler reads the same JSON the site's own
+JavaScript uses:
+
+```bash
+curl 'https://mitadmissions.org/wp-json/wp/v2/posts?per_page=1&_embed=1&slug=<slug>'
+```
+
+That single request returns title, date, author (`_embedded.author`), the full
+rendered content and **every** image URL — 58 for a post whose DOM only showed
+48, because lazy images below the fold never load.
+
+So the crawler is a hybrid:
+
+| Field | Source |
+|---|---|
+| Title, Author, Time, Article Content, Image URLs | WordPress REST API |
+| Comment Count | Disqus iframe in the browser (the REST API reports 0 comments) |
+
+Playwright is still the driver: it renders the article, forces each lazy image
+into view (`scroll_into_view_if_needed`) so the response listener captures the
+bytes, and reads the Disqus frame. Use `--no-rest` to fall back to pure DOM
+extraction.
+
+Current coverage on a 58-image post: 58 URLs in the CSV, 46 files captured. The
+missing files are duplicate size variants the browser never requests.
+
 ## Cross-check results (16 posts on the listing page)
 
 ```

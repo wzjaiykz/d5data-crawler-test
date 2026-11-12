@@ -179,11 +179,47 @@ def read_comment_count(page, timeout_ms: int = 10_000) -> str:
     return ""
 
 
-def scrape_article(page, collector: ImageCollector, url: str, comment_timeout_ms: int) -> Article:
+
+def rest_post(slug: str) -> dict:
+    """Fetch one post from the WordPress REST API (no browser, complete content)."""
+    url = (
+        f"https://mitadmissions.org/wp-json/wp/v2/posts?per_page=1&_embed=1&slug={slug}"
+    )
+    try:
+        response = requests.get(url, timeout=20, headers={"User-Agent": USER_AGENT})
+        if response.status_code != 200:
+            return {}
+        payload = response.json()
+        return payload[0] if payload else {}
+    except (requests.RequestException, ValueError):
+        return {}
+
+
+def rest_images(post: dict) -> str:
+    """Every image referenced by the rendered content, in document order."""
+    html = (post.get("content") or {}).get("rendered") or ""
+    sources = re.findall(r'<img[^>]+src="([^"]+)"', html)
+    cleaned = [src for src in sources if keep_image(src)]
+    return "; ".join(dict.fromkeys(cleaned))
+
+
+
+def scrape_article(
+    page, collector: ImageCollector, url: str, comment_timeout_ms: int, rest_mode: bool = True
+) -> Article:
+    slug = url.rstrip("/").rsplit("/", 1)[-1]
     collector.reset()
     page.goto(url, wait_until="domcontentloaded", timeout=60_000)
     page.wait_for_selector(".article__body", timeout=30_000)
     settle_page(page)
+    # Lazy images only fetch when they approach the viewport; walk them so the
+    # response listener captures every one of them.
+    for element in page.query_selector_all(".article__body img"):
+        try:
+            element.scroll_into_view_if_needed(timeout=1_500)
+        except Exception:  # noqa: BLE001
+            continue
+    page.wait_for_timeout(600)
 
     title = page.evaluate(
         """() => {
@@ -211,6 +247,17 @@ def scrape_article(page, collector: ImageCollector, url: str, comment_timeout_ms
         "nodes => nodes.map(n => n.currentSrc || n.src).filter(Boolean)",
     )
     urls = sorted({src for src in dom_sources if keep_image(src)})
+
+    if rest_mode:
+        post = rest_post(slug)
+        if post:
+            rest_urls = rest_images(post)
+            if rest_urls:
+                urls = rest_urls.split("; ")
+                title = re.sub("<[^>]+>", "", post["title"]["rendered"]).strip() or title
+                published = post.get("date") or published
+                author_node = (post.get("_embedded") or {}).get("author") or [{}]
+                author = author_node[0].get("name") or author
 
     return Article(
         title=title,
@@ -266,6 +313,9 @@ def main() -> int:
     parser.add_argument("--out", default="blogs_playwright.csv")
     parser.add_argument("--image-dir", default="images_playwright")
     parser.add_argument("--comment-timeout", type=int, default=8_000)
+    parser.add_argument(
+        "--no-rest", action="store_true", help="ignore the WordPress REST API"
+    )
     args = parser.parse_args()
 
     collector = ImageCollector()
@@ -288,7 +338,9 @@ def main() -> int:
         for index, url in enumerate(links, 1):
             started = time.perf_counter()
             try:
-                article = scrape_article(page, collector, url, args.comment_timeout)
+                article = scrape_article(
+                    page, collector, url, args.comment_timeout, rest_mode=not args.no_rest
+                )
             except Exception as exc:  # noqa: BLE001 - one bad page must not stop the run
                 print(f"[{index}/{len(links)}] FAILED {url}: {exc}", file=sys.stderr)
                 continue
