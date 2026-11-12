@@ -18,5 +18,8 @@ jobs:
       - name: Byte-compile every script
         run: python -m compileall -q crawl_playwright.py crawl_drissionpage.py compare.py image_rules.py
 
+      - name: Install test runner
+        run: python -m pip install pytest
+
       - name: Unit-test the image grouping rules
         run: python -m pytest tests -q
