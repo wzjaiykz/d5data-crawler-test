@@ -25,6 +25,8 @@ import requests
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 
+from image_rules import keep_largest
+
 BASE_URL = "https://mitadmissions.org/blogs/"
 FIELDS = ["Title", "Author", "Comment Count", "Time", "Article Content", "Images In Article"]
 COMMENT_PATTERN = re.compile(r"(\d+)\s+Comments?", re.IGNORECASE)
@@ -246,14 +248,14 @@ def scrape_article(
         ".article__body img",
         "nodes => nodes.map(n => n.currentSrc || n.src).filter(Boolean)",
     )
-    urls = sorted({src for src in dom_sources if keep_image(src)})
+    urls = keep_largest(sorted({src for src in dom_sources if keep_image(src)}))
 
     if rest_mode:
         post = rest_post(slug)
         if post:
             rest_urls = rest_images(post)
             if rest_urls:
-                urls = rest_urls.split("; ")
+                urls = keep_largest(rest_urls.split("; "))
                 title = re.sub("<[^>]+>", "", post["title"]["rendered"]).strip() or title
                 published = post.get("date") or published
                 author_node = (post.get("_embedded") or {}).get("author") or [{}]

@@ -19,6 +19,8 @@ import time
 
 from DrissionPage import ChromiumOptions, ChromiumPage
 
+from image_rules import keep_largest
+
 BASE_URL = "https://mitadmissions.org/blogs/"
 FIELDS = ["Title", "Author", "Comment Count", "Time", "Article Content", "Images In Article"]
 COMMENT_PATTERN = re.compile(r"(\d+)\s+Comments?", re.IGNORECASE)
@@ -132,11 +134,11 @@ def scrape_article(page, url: str) -> dict[str, object]:
     content = body_element.text.strip() if body_element else ""
     content = WHITESPACE.sub(" ", content)  # one row per article
 
-    image_sources = {
+    image_sources = keep_largest(
         urljoin(page.url, element.attr("src"))
         for element in page.eles("css:.article__body img")
         if element.attr("src") and keep_image(element.attr("src"))
-    }
+    )
 
     return {
         "Title": title,

@@ -134,6 +134,18 @@ extraction.
 Current coverage on a 58-image post: 58 URLs in the CSV, 46 files captured. The
 missing files are duplicate size variants the browser never requests.
 
+
+### Same image, several sizes
+
+WordPress writes size variants next to the original (image1-400x300.jpg,
+image1-800x533.jpg, image1.jpg). image_rules.keep_largest() groups URLs by
+their file name, keeps one per upload and prefers the largest pixel area (the
+suffix states the size, so no image analysis is involved).
+
+Measured on a real post: 58 URLs in, 58 out - that article references 58
+distinct uploads, so there was nothing to collapse. The helper still matters for
+posts that embed several sizes of the same picture.
+
 ## Cross-check results (16 posts on the listing page)
 
 ```
