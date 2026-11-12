@@ -24,6 +24,10 @@ TRANSLATE = str.maketrans(
 )
 
 
+def url_set(value: str) -> set[str]:
+    return {part.strip() for part in value.split(";") if part.strip()}
+
+
 def normalise(value: str) -> str:
     return WHITESPACE.sub(" ", (value or "").translate(TRANSLATE).strip())
 
@@ -72,6 +76,11 @@ def main() -> int:
                     same += 1
                 else:
                     diffs.append((title, f"{ratio:.3f} {a}", b))
+            elif field == "Images In Article":
+                if url_set(a) == url_set(b):
+                    same += 1
+                else:
+                    diffs.append((title, a, b))
             elif a == b:
                 same += 1
             else:

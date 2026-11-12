@@ -9,8 +9,12 @@ Usage:
 
 import argparse
 import csv
+import pathlib
+from urllib.parse import urljoin
 import re
 import sys
+
+WHITESPACE = re.compile(r"\s+")
 import time
 
 from DrissionPage import ChromiumOptions, ChromiumPage
@@ -29,6 +33,17 @@ def make_page(headless: bool) -> ChromiumPage:
     return ChromiumPage(options)
 
 
+
+EMOJI_HOSTS = ("s.w.org/images/core/emoji", "wordpress.org/images/core/emoji")
+
+
+def keep_image(url: str) -> bool:
+    lowered = url.lower()
+    if any(host in lowered for host in EMOJI_HOSTS):
+        return False
+    return not (lowered.endswith(".svg") and "emoji" in lowered)
+
+
 def scroll_through(page, pause: float = 0.25) -> None:
     """Trigger lazy-loaded images by scrolling the whole document."""
     page.scroll.to_bottom()
@@ -37,20 +52,42 @@ def scroll_through(page, pause: float = 0.25) -> None:
     page.wait(pause)
 
 
-def collect_links(page, limit: int | None) -> list[str]:
-    page.get(BASE_URL)
-    page.wait.doc_loaded()
-    page.ele("css:.post-tease__h__link", timeout=20)
+def page_url(number: int) -> str:
+    return BASE_URL if number == 1 else f"{BASE_URL}page/{number}/"
 
+
+def collect_links(page, max_pages: int, max_posts: int | None) -> list[str]:
+    """Walk the paginated listing until it runs out of *new* articles."""
     links: list[str] = []
-    for element in page.eles("css:.post-tease__h__link"):
-        href = element.attr("href") or ""
-        if "/blogs/entry/" not in href:
-            continue
-        url = href if href.startswith("http") else f"https://mitadmissions.org{href}"
-        if url not in links:
-            links.append(url)
-    return links[:limit] if limit else links
+    for number in range(1, max_pages + 1):
+        page.get(page_url(number))
+        page.wait.doc_loaded()
+        first = page.ele("css:.post-tease__h__link", timeout=15)
+        if not first:
+            print(f"page {number}: no posts, stopping", file=sys.stderr)
+            break
+
+        fresh = []
+        for element in page.eles("css:.post-tease__h__link"):
+            href = element.attr("href") or ""
+            if "/blogs/entry/" not in href:
+                continue
+            url = href if href.startswith("http") else f"https://mitadmissions.org{href}"
+            if url not in links and url not in fresh:
+                fresh.append(url)
+
+        # Last page guard: a "next" link can wrap around to page 1, so trust the
+        # absence of new articles rather than the link itself.
+        if not fresh:
+            print(f"page {number}: no new articles, stopping", file=sys.stderr)
+            break
+
+        links.extend(fresh)
+        print(f"page {number}: +{len(fresh)} (total {len(links)})", file=sys.stderr)
+        if max_posts and len(links) >= max_posts:
+            return links[:max_posts]
+
+    return links
 
 
 def read_comment_count(page, timeout: float = 12.0) -> str:
@@ -93,11 +130,12 @@ def scrape_article(page, url: str) -> dict[str, object]:
 
     body_element = page.ele("css:.article__body", timeout=10)
     content = body_element.text.strip() if body_element else ""
+    content = WHITESPACE.sub(" ", content)  # one row per article
 
     image_sources = {
-        element.attr("src")
+        urljoin(page.url, element.attr("src"))
         for element in page.eles("css:.article__body img")
-        if element.attr("src")
+        if element.attr("src") and keep_image(element.attr("src"))
     }
 
     return {
@@ -106,12 +144,34 @@ def scrape_article(page, url: str) -> dict[str, object]:
         "Comment Count": read_comment_count(page),
         "Time": published,
         "Article Content": content,
-        "Images In Article": len(image_sources),
+        "Images In Article": "; ".join(sorted(image_sources)),
     }
+
+
+
+def download_images(page, urls: str, url: str, folder: pathlib.Path) -> int:
+    """Download every image URL into images/<slug>/ using DrissionPage's downloader."""
+    if not urls:
+        return 0
+    slug = url.rstrip("/").split("/")[-1] or "article"
+    target = folder / slug
+    target.mkdir(parents=True, exist_ok=True)
+    saved = 0
+    for index, image_url in enumerate((u.strip() for u in urls.split(";") if u.strip()), start=1):
+        suffix = pathlib.Path(image_url.split("?")[0]).suffix or ".jpg"
+        if len(suffix) > 5:
+            suffix = ".jpg"
+        try:
+            page.download(image_url, str(target), f"{index:02d}{suffix}")
+            saved += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return saved
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--max-pages", type=int, default=10_000, help="stop after N listing pages")
     parser.add_argument("--max-posts", type=int, default=None)
     parser.add_argument("--out", default="blogs_drissionpage.csv")
     parser.add_argument("--headless", action="store_true", default=True)
@@ -120,7 +180,7 @@ def main() -> int:
     page = make_page(headless=args.headless)
     rows: list[dict[str, object]] = []
     try:
-        links = collect_links(page, args.max_posts)
+        links = collect_links(page, args.max_pages, args.max_posts)
         print(f"found {len(links)} article(s)", file=sys.stderr)
 
         for index, url in enumerate(links, start=1):
@@ -130,11 +190,12 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001
                 print(f"[{index}/{len(links)}] FAILED {url}: {exc}", file=sys.stderr)
                 continue
+            download_images(page, str(row["Images In Article"]), url, pathlib.Path("images"))
             rows.append(row)
             print(
                 f"[{index}/{len(links)}] {str(row['Title'])[:40]:40s} "
                 f"comments={str(row['Comment Count']) or '-':>3s} "
-                f"images={row['Images In Article']} "
+                f"images={len(str(row['Images In Article']).split(';')) if row['Images In Article'] else 0} "
                 f"chars={len(str(row['Article Content']))} "
                 f"{time.perf_counter() - started:.1f}s",
                 file=sys.stderr,

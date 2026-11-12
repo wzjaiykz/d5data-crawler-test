@@ -2,24 +2,50 @@
 
 Fields: Title | Author | Comment Count | Time | Article Content | Images In Article
 
+Images are collected from the network layer (what DevTools shows under the Img
+filter) instead of scanning every <img> in the DOM: only real image responses
+are kept, lazy-loaded ones included, and the body is reused for downloading.
+
 Usage:
-    python crawl_playwright.py --max-posts 5
-    python crawl_playwright.py                 # all posts on the listing page
+    python crawl_playwright.py --max-pages 2 --max-posts 5
+    python crawl_playwright.py                  # every listing page
 """
 
 import argparse
+import concurrent.futures
 import csv
+import pathlib
 import re
 import sys
 import time
+import urllib.parse
 from dataclasses import asdict, dataclass
 
+import requests
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 
 BASE_URL = "https://mitadmissions.org/blogs/"
 FIELDS = ["Title", "Author", "Comment Count", "Time", "Article Content", "Images In Article"]
 COMMENT_PATTERN = re.compile(r"(\d+)\s+Comments?", re.IGNORECASE)
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+WHITESPACE = re.compile(r"\s+")
+
+# Emoji sprites and avatars are served as images but are not article content.
+IGNORED_IMAGE_PARTS = (
+    "s.w.org/images/core/emoji",
+    "wordpress.org/images/core/emoji",
+    "c.disquscdn.com",
+    "disquscdn.com",
+    "disqus.com",
+    "/avatar",
+    "gravatar",
+    "spinner",
+    "emoji",
+)
 
 
 @dataclass
@@ -29,66 +55,132 @@ class Article:
     comment_count: str
     published: str
     content: str
-    images: int
+    images: str
 
 
+def page_url(number: int) -> str:
+    return BASE_URL if number == 1 else f"{BASE_URL}page/{number}/"
 
-def settle_page(page, pause_ms: int = 800) -> None:
+
+def keep_image(url: str) -> bool:
+    lowered = url.lower()
+    return not any(part in lowered for part in IGNORED_IMAGE_PARTS)
+
+
+class ImageCollector:
+    """Record image responses (Playwright equivalent of the DevTools Img filter)."""
+
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+        self.bodies: dict[str, bytes] = {}
+
+    def reset(self) -> None:
+        self.urls.clear()
+        self.bodies.clear()
+
+    def handler(self, response) -> None:
+        try:
+            if response.request.resource_type != "image" or not response.ok:
+                return
+            url = response.url
+            if not keep_image(url):
+                return
+            if url not in self.urls:
+                self.urls.append(url)
+            # Plain HTTP clients are blocked by Cloudflare, so keep the bytes the
+            # browser already received. Only first-party images are worth the memory.
+            if "mitadmissions.org" in url and url not in self.bodies:
+                self.bodies[url] = response.body()
+        except Exception:  # noqa: BLE001 - a broken image must not abort the crawl
+            return
+
+
+def settle_page(page, pause_ms: int = 400) -> None:
     """Scroll through the page so lazy images and embeds actually load."""
-    height = page.evaluate("document.body.scrollHeight")
-    step = max(400, height // 8)
-    for y in range(0, height + step, step):
-        page.evaluate(f"window.scrollTo(0, {y})")
-        page.wait_for_timeout(250)
+    previous = -1
+    for _ in range(14):  # lazy content keeps growing the document; stop when it settles
+        height = page.evaluate("document.body.scrollHeight")
+        page.evaluate(f"window.scrollTo(0, {height})")
+        page.wait_for_timeout(200)
+        if height == previous:
+            break
+        previous = height
     page.evaluate("window.scrollTo(0, 0)")
-    try:
-        page.wait_for_load_state("networkidle", timeout=8_000)
-    except PlaywrightTimeout:
-        pass
     page.wait_for_timeout(pause_ms)
 
 
-def collect_links(page, limit: int | None) -> list[str]:
-    """Read the listing page and return article URLs (deduplicated, in page order)."""
-    page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60_000)
-    page.wait_for_selector(".post-tease__h__link", timeout=30_000)
-
-    hrefs = page.eval_on_selector_all(
-        ".post-tease__h__link", "nodes => nodes.map(n => n.getAttribute('href'))"
-    )
+def collect_links(page, max_pages: int, max_posts: int | None) -> list[str]:
+    """Walk the paginated listing until it runs out of *new* articles."""
     links: list[str] = []
-    for href in hrefs:
-        if not href or "/blogs/entry/" not in href:
-            continue
-        url = href if href.startswith("http") else f"https://mitadmissions.org{href}"
-        if url not in links:
-            links.append(url)
-    return links[:limit] if limit else links
+    for number in range(1, max_pages + 1):
+        response = page.goto(page_url(number), wait_until="domcontentloaded", timeout=60_000)
+        if response is not None and response.status >= 400:
+            print(f"page {number}: HTTP {response.status}, stopping", file=sys.stderr)
+            break
+
+        try:
+            page.wait_for_selector(".post-tease__h__link", timeout=20_000)
+        except PlaywrightTimeout:
+            print(f"page {number}: no posts, stopping", file=sys.stderr)
+            break
+
+        hrefs = page.eval_on_selector_all(
+            ".post-tease__h__link", "nodes => nodes.map(n => n.getAttribute('href'))"
+        )
+        fresh = []
+        for href in hrefs:
+            if not href or "/blogs/entry/" not in href:
+                continue
+            url = href if href.startswith("http") else f"https://mitadmissions.org{href}"
+            if url not in links and url not in fresh:
+                fresh.append(url)
+
+        # Last page guard: WordPress can render a "next" link that wraps to page 1,
+        # so stop as soon as a page yields nothing new instead of trusting the link.
+        if not fresh:
+            print(f"page {number}: no new articles, stopping", file=sys.stderr)
+            break
+
+        links.extend(fresh)
+        print(f"page {number}: +{len(fresh)} (total {len(links)})", file=sys.stderr)
+        if max_posts and len(links) >= max_posts:
+            return links[:max_posts]
+
+    return links
 
 
-def read_comment_count(page, timeout_ms: int = 12_000) -> str:
-    """Disqus renders inside an iframe; wait for it and read "N Comments".
-
-    Falls back to an empty string when Disqus is blocked or the post has no thread.
-    """
+def read_comment_count(page, timeout_ms: int = 10_000) -> str:
+    """Disqus renders in an iframe; expand "load more" first, then read the count."""
     try:
         page.wait_for_selector("#disqus_thread iframe", timeout=timeout_ms)
         handle = page.query_selector("#disqus_thread iframe")
         frame = handle.content_frame() if handle else None
         if frame is None:
             return ""
+
+        for _ in range(3):  # a thread may paginate behind "Load more comments"
+            try:
+                more = frame.query_selector("text=/load more|more comments/i")
+                if not more:
+                    break
+                more.click()
+                page.wait_for_timeout(800)
+            except Exception:  # noqa: BLE001
+                break
+
         text = frame.inner_text("body")
         match = COMMENT_PATTERN.search(text)
         if match:
             return match.group(1)
         if re.search(r"no comments|be the first", text, re.IGNORECASE):
             return "0"
-    except (PlaywrightTimeout, Exception):  # noqa: BLE001 - comment count is best effort
+    except (PlaywrightTimeout, Exception):  # noqa: BLE001 - best effort
         return ""
     return ""
 
 
-def scrape_article(page, url: str, comment_timeout_ms: int) -> Article:
+def scrape_article(page, collector: ImageCollector, url: str, comment_timeout_ms: int) -> Article:
+    collector.reset()
     page.goto(url, wait_until="domcontentloaded", timeout=60_000)
     page.wait_for_selector(".article__body", timeout=30_000)
     settle_page(page)
@@ -102,7 +194,7 @@ def scrape_article(page, url: str, comment_timeout_ms: int) -> Article:
             return clone.textContent.replace(/\\s+/g, ' ').trim();
         }"""
     )
-    # The author is rendered as "by Nicholas R. '29" inside the title link.
+
     author_raw = page.inner_text(".page-topper__title__name").strip()
     author = re.sub(r"^by\s+", "", author_raw, flags=re.IGNORECASE)
 
@@ -110,22 +202,43 @@ def scrape_article(page, url: str, comment_timeout_ms: int) -> Article:
     if not published:
         published = page.inner_text("time.page-topper__date").strip()
 
-    content = page.inner_text(".article__body").strip()
+    content = WHITESPACE.sub(" ", page.inner_text(".article__body").strip())
 
-    image_srcs = page.eval_on_selector_all(
-        ".article__body img", "nodes => nodes.map(n => n.getAttribute('src') || '')"
+    # The DOM is the source of truth for *which* images belong to the article;
+    # the network layer only supplies their bytes for the download step.
+    dom_sources = page.eval_on_selector_all(
+        ".article__body img",
+        "nodes => nodes.map(n => n.currentSrc || n.src).filter(Boolean)",
     )
-    images = len({src for src in image_srcs if src})
+    urls = sorted({src for src in dom_sources if keep_image(src)})
 
-    comment_count = read_comment_count(page, comment_timeout_ms)
     return Article(
         title=title,
         author=author,
-        comment_count=comment_count,
+        comment_count=read_comment_count(page, comment_timeout_ms),
         published=published,
         content=content,
-        images=images,
+        images="; ".join(sorted(urls)),
     )
+
+
+def save_images(collector: ImageCollector, urls: str, article_url: str, root: pathlib.Path) -> int:
+    """Write the image bytes captured while the page was loading."""
+    items = [u.strip() for u in urls.split(";") if u.strip()]
+    if not items:
+        return 0
+    slug = article_url.rstrip("/").rsplit("/", 1)[-1] or "article"
+    folder = root / slug
+    folder.mkdir(parents=True, exist_ok=True)
+    saved = 0
+    for index, image_url in enumerate(items, 1):
+        body = collector.bodies.get(image_url)
+        if not body:
+            continue
+        suffix = pathlib.Path(urllib.parse.urlparse(image_url).path).suffix or ".jpg"
+        (folder / f"{index:02d}{suffix}").write_bytes(body)
+        saved += 1
+    return saved
 
 
 def write_csv(articles: list[Article], path: str) -> None:
@@ -148,13 +261,14 @@ def write_csv(articles: list[Article], path: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--max-posts", type=int, default=None, help="limit the number of posts")
+    parser.add_argument("--max-pages", type=int, default=10_000, help="stop after N listing pages")
+    parser.add_argument("--max-posts", type=int, default=None)
     parser.add_argument("--out", default="blogs_playwright.csv")
-    parser.add_argument(
-        "--comment-timeout", type=int, default=12_000, help="ms to wait for the Disqus frame"
-    )
+    parser.add_argument("--image-dir", default="images_playwright")
+    parser.add_argument("--comment-timeout", type=int, default=8_000)
     args = parser.parse_args()
 
+    collector = ImageCollector()
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context(
@@ -165,28 +279,29 @@ def main() -> int:
             ),
         )
         page = context.new_page()
+        page.on("response", collector.handler)
 
-        links = collect_links(page, args.max_posts)
-        print(f"found {len(links)} article(s)", file=sys.stderr)
+        links = collect_links(page, args.max_pages, args.max_posts)
+        print(f"total {len(links)} article(s)", file=sys.stderr)
 
         articles: list[Article] = []
-        for index, url in enumerate(links, start=1):
+        for index, url in enumerate(links, 1):
             started = time.perf_counter()
             try:
-                article = scrape_article(page, url, args.comment_timeout)
-            except Exception as exc:  # noqa: BLE001 - keep going on a single failure
+                article = scrape_article(page, collector, url, args.comment_timeout)
+            except Exception as exc:  # noqa: BLE001 - one bad page must not stop the run
                 print(f"[{index}/{len(links)}] FAILED {url}: {exc}", file=sys.stderr)
                 continue
+            saved = save_images(collector, article.images, url, pathlib.Path(args.image_dir))
             articles.append(article)
             print(
-                f"[{index}/{len(links)}] {article.title[:40]:40s} "
+                f"[{index}/{len(links)}] {article.title[:36]:36s} "
                 f"comments={article.comment_count or '-':>3s} "
-                f"images={article.images} "
-                f"chars={len(article.content)} "
+                f"images={saved:>2d} chars={len(article.content):>6d} "
                 f"{time.perf_counter() - started:.1f}s",
                 file=sys.stderr,
             )
-            time.sleep(0.5)  # be polite to the site
+            time.sleep(0.4)
 
         browser.close()
 

@@ -68,6 +68,44 @@ python crawl_playwright.py --comment-timeout 6000   # give up on Disqus sooner
 4. **Polite crawling.** 0.5 s between detail pages, one browser instance reused
    for the whole run.
 
+## Pagination
+
+The listing is paginated (`/blogs/page/N/`, ~492 pages). Both crawlers walk it
+until it stops producing new articles and support `--max-pages`:
+
+```bash
+python crawl_playwright.py --max-pages 3
+python crawl_drissionpage.py --max-pages 3
+```
+
+**The trap at the end:** WordPress renders a "next" link that wraps around to
+page 1 on the last page, so following the link would loop forever. The stop
+condition is therefore "this page yielded no new article URLs" rather than
+"there is no next link" — the same guard also catches an HTTP 404/500 page.
+
+Comment threads are **not** paginated on this site: the Disqus embed renders the
+whole thread at once. The crawler still clicks a "load more comments" control up
+to three times if one ever appears, then reads the count.
+
+## Images
+
+`Images In Article` holds the image URLs, `;`-separated — not a count:
+
+```
+https://mitadmissions.org/wp-content/uploads/2026/11/image1-800x533.jpg; ...
+```
+
+- Playwright collects candidates from the **network layer**
+  (`response.request.resource_type == "image"`, the same view as DevTools' Img
+  filter) and uses the DOM to decide which of them belong to the article body.
+- DrissionPage reads `.article__body img` and resolves relative srcs with
+  `urljoin`.
+- Emoji sprites (`s.w.org/...`), avatars, gravatar and Disqus CDN images are
+  filtered out.
+- Files are also written to `images_playwright/<slug>/01.jpg`, ... Playwright
+  reuses the bytes the browser already downloaded because plain `requests` calls
+  are blocked by Cloudflare; DrissionPage uses `page.download()`.
+
 ## Cross-check results (16 posts on the listing page)
 
 ```
